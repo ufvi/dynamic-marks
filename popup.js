@@ -1,6 +1,34 @@
 const HISTORY_MAX = 100000;
 const SUGGEST_TOP_N = 30;
-const NEW_BOOKMARK_GRACE_DAYS = 7;
+
+// ── Ignore list helpers ───────────────────────────────────
+
+async function loadIgnoreList(key) {
+  const data = await chrome.storage.local.get(key);
+  return data[key] || [];
+}
+
+async function saveIgnoreList(key, list) {
+  await chrome.storage.local.set({ [key]: list });
+}
+
+async function getIgnoredUrls(key) {
+  const list = await loadIgnoreList(key);
+  return new Set(list.map(e => e.url));
+}
+
+async function addIgnore(key, url, title) {
+  const list = await loadIgnoreList(key);
+  if (!list.some(e => e.url === url)) {
+    list.push({ url, title, dateAdded: Date.now() });
+    await saveIgnoreList(key, list);
+  }
+}
+
+async function removeIgnore(key, url) {
+  const list = await loadIgnoreList(key);
+  await saveIgnoreList(key, list.filter(e => e.url !== url));
+}
 
 // ── Init ──────────────────────────────────────────────────
 
@@ -11,6 +39,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-sort').addEventListener('click', onSort);
   document.getElementById('btn-discover').addEventListener('click', onDiscover);
   document.getElementById('btn-cleanup').addEventListener('click', onCleanup);
+  document.getElementById('btn-settings').addEventListener('click', showSettings);
+  document.getElementById('btn-back').addEventListener('click', hideSettings);
 });
 
 function switchTab(id) {
@@ -18,6 +48,17 @@ function switchTab(id) {
   document.querySelector(`.tab-btn[data-tab="${id}"]`).classList.add('active');
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.getElementById(`tab-${id}`).classList.add('active');
+}
+
+function showSettings() {
+  document.getElementById('main-view').classList.add('hidden');
+  document.getElementById('settings-view').classList.remove('hidden');
+  renderSettings();
+}
+
+function hideSettings() {
+  document.getElementById('settings-view').classList.add('hidden');
+  document.getElementById('main-view').classList.remove('hidden');
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -136,7 +177,6 @@ async function sortTree(node, historyMap) {
 
   if (!node.children || node.children.length === 0) return { bookmarks, folders };
 
-  // Sort subfolders first
   for (const child of node.children) {
     if (!child.url) {
       const r = await sortTree(child, historyMap);
@@ -145,7 +185,6 @@ async function sortTree(node, historyMap) {
     }
   }
 
-  // Re-fetch after subfolder mutations
   const [fresh] = await chrome.bookmarks.getSubTree(node.id);
   const kids = fresh.children;
 
@@ -167,6 +206,8 @@ async function sortTree(node, historyMap) {
 
 // ── Tab 2: Discover ──────────────────────────────────────
 
+const IGNORE_KEY_DISCOVER = 'discoverIgnore';
+
 async function onDiscover() {
   const tab = 'discover';
   setLoading(tab, true);
@@ -177,13 +218,14 @@ async function onDiscover() {
     const days = +document.querySelector('input[name="discoverPeriod"]:checked').value;
     const startTime = Date.now() - days * 86400000;
 
-    const [historyItems, bookmarkUrls] = await Promise.all([
+    const [historyItems, bookmarkUrls, ignoredUrls] = await Promise.all([
       chrome.history.search({ text: '', maxResults: HISTORY_MAX, startTime }),
-      getAllBookmarkUrls()
+      getAllBookmarkUrls(),
+      getIgnoredUrls(IGNORE_KEY_DISCOVER)
     ]);
 
     const candidates = historyItems
-      .filter(h => !bookmarkUrls.has(h.url) && !isInternal(h.url))
+      .filter(h => !bookmarkUrls.has(h.url) && !isInternal(h.url) && !ignoredUrls.has(h.url))
       .sort((a, b) => b.visitCount - a.visitCount)
       .slice(0, SUGGEST_TOP_N);
 
@@ -220,9 +262,12 @@ function bindDiscoverActions(items) {
       }
     });
   });
+  bindIgnoreButtons(items, IGNORE_KEY_DISCOVER);
 }
 
 // ── Tab 3: Cleanup ───────────────────────────────────────
+
+const IGNORE_KEY_CLEANUP = 'cleanupIgnore';
 
 async function onCleanup() {
   const tab = 'cleanup';
@@ -232,47 +277,41 @@ async function onCleanup() {
 
   try {
     const days = +document.querySelector('input[name="cleanupPeriod"]:checked').value;
-    const tree = await chrome.bookmarks.getTree();
-    const allBms = flattenBookmarks(tree);
+    const startTime = Date.now() - days * 86400000;
 
-    // Exclude recently created bookmarks
-    const graceCutoff = Date.now() - NEW_BOOKMARK_GRACE_DAYS * 86400000;
-    const eligible = allBms.filter(b => b.dateAdded < graceCutoff && !isInternal(b.url));
+    const [tree, ignoredUrls] = await Promise.all([
+      chrome.bookmarks.getTree(),
+      getIgnoredUrls(IGNORE_KEY_CLEANUP)
+    ]);
+    const allBms = flattenBookmarks(tree).filter(b => !isInternal(b.url) && !ignoredUrls.has(b.url));
 
-    const historyMap = await buildHistoryMap(0);
-    const cutoff = days > 0 ? Date.now() - days * 86400000 : null;
+    const historyMap = await buildHistoryMap(startTime);
 
-    const unused = eligible.filter(b => {
-      const h = historyMap[b.url];
-      if (!h) return true; // never visited
-      if (cutoff && h.lastVisitTime >= cutoff) return false; // visited recently
-      if (days === 0) return false; // "never visited" mode: in history = visited
-      return h.lastVisitTime < cutoff;
-    });
+    const ranked = allBms.map(b => ({
+      ...b,
+      _visits: historyMap[b.url]?.visitCount || 0,
+      _lastVisit: historyMap[b.url]?.lastVisitTime || null
+    }));
 
-    // Sort: never visited first, then by oldest visit
-    unused.sort((a, b) => {
-      const ha = historyMap[a.url];
-      const hb = historyMap[b.url];
-      const va = ha ? ha.lastVisitTime : 0;
-      const vb = hb ? hb.lastVisitTime : 0;
-      return va - vb;
+    ranked.sort((a, b) => {
+      if (a._visits !== b._visits) return a._visits - b._visits;
+      return (a._lastVisit || 0) - (b._lastVisit || 0);
     });
 
     resultEl.classList.remove('hidden');
 
-    if (unused.length === 0) {
-      resultEl.innerHTML = '<div class="result-empty">没有找到无用书签，你的收藏夹维护得很好！</div>';
+    if (ranked.length === 0) {
+      resultEl.innerHTML = '<div class="result-empty">收藏夹中没有书签。</div>';
       return;
     }
 
-    resultEl.innerHTML = renderUrlList(unused, {
-      header: `找到 ${unused.length} 个无用书签`,
+    resultEl.innerHTML = renderUrlList(ranked, {
+      header: `${ranked.length} 个书签，按最近 ${days} 天访问频次从低到高排列`,
       type: 'cleanup',
       historyMap
     });
 
-    bindCleanupActions(unused);
+    bindCleanupActions(ranked);
   } catch (err) {
     showError(tab, `扫描失败：${err.message}`);
   } finally {
@@ -293,6 +332,68 @@ function bindCleanupActions(items) {
       } catch {
         btn.textContent = '移除失败';
       }
+    });
+  });
+  bindIgnoreButtons(items, IGNORE_KEY_CLEANUP);
+}
+
+// ── Ignore button binding ───────────────────────────────
+
+function bindIgnoreButtons(items, key) {
+  document.querySelectorAll('.btn-ignore-action').forEach((btn, i) => {
+    btn.addEventListener('click', async () => {
+      const item = items[i];
+      await addIgnore(key, item.url, item.title || item.url);
+      const row = btn.closest('.result-item');
+      row.style.opacity = '0.3';
+      row.style.pointerEvents = 'none';
+      btn.textContent = '已忽略';
+    });
+  });
+}
+
+// ── Settings view ────────────────────────────────────────
+
+async function renderSettings() {
+  await Promise.all([
+    renderIgnoreSection(IGNORE_KEY_DISCOVER, 'ignore-discover-list', '发现'),
+    renderIgnoreSection(IGNORE_KEY_CLEANUP, 'ignore-cleanup-list', '清理')
+  ]);
+}
+
+async function renderIgnoreSection(key, containerId, label) {
+  const container = document.getElementById(containerId);
+  const list = await loadIgnoreList(key);
+
+  if (list.length === 0) {
+    container.innerHTML = '<div class="result-empty">暂无忽略的网站</div>';
+    return;
+  }
+
+  const rows = list.map(item => `
+    <div class="result-item">
+      <img class="favicon" src="${favicon(item.url)}" alt="" onerror="this.style.display='none'">
+      <div class="info">
+        <div class="site-title" title="${esc(item.title || item.url)}">${esc(item.title || item.url)}</div>
+        <div class="site-url" title="${esc(item.url)}">${esc(item.url)}</div>
+        <div class="site-meta">${daysAgo(item.dateAdded)} 添加</div>
+      </div>
+      <div class="actions">
+        <button class="btn-small btn-unignore" data-key="${esc(key)}" data-url="${esc(item.url)}">取消忽略</button>
+      </div>
+    </div>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="result">
+      <div class="result-header">${label} — ${list.length} 个</div>
+      <div class="result-list">${rows}</div>
+    </div>`;
+
+  container.querySelectorAll('.btn-unignore').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await removeIgnore(btn.dataset.key, btn.dataset.url);
+      renderIgnoreSection(btn.dataset.key, containerId, label);
     });
   });
 }
@@ -334,10 +435,12 @@ function itemMeta(item, opts) {
 
 function itemActions(item, opts, i) {
   if (opts.type === 'discover') {
-    return `<button class="btn-small btn-add" data-idx="${i}">+ 收藏</button>`;
+    return `<button class="btn-small btn-add">+ 收藏</button>
+            <button class="btn-small btn-ignore btn-ignore-action">忽略</button>`;
   }
   if (opts.type === 'cleanup') {
-    return `<button class="btn-small btn-danger btn-remove" data-idx="${i}">移除</button>`;
+    return `<button class="btn-small btn-ignore btn-ignore-action">忽略</button>
+            <button class="btn-small btn-danger btn-remove">移除</button>`;
   }
   return '';
 }

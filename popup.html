@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dynamic Marks</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <h1 class="title">Dynamic Marks</h1>
+    <p class="subtitle">智能收藏夹管理</p>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="sort">
+      <span class="tab-icon">📊</span>
+      <span class="tab-label">排序</span>
+    </button>
+    <button class="tab-btn" data-tab="discover">
+      <span class="tab-icon">🔍</span>
+      <span class="tab-label">发现</span>
+    </button>
+    <button class="tab-btn" data-tab="cleanup">
+      <span class="tab-icon">🧹</span>
+      <span class="tab-label">清理</span>
+    </button>
+  </nav>
+
+  <main class="content">
+
+    <!-- Tab 1: 按热度排序 -->
+    <section id="tab-sort" class="tab-panel active">
+      <div class="card">
+        <p class="card-desc">根据浏览频率，将每个文件夹内的书签按访问频次从高到低排列。常访问的书签会移到前面。</p>
+        <button id="btn-sort" class="btn btn-primary">
+          <span class="btn-text">一键按热度排序</span>
+          <span class="btn-loader hidden"></span>
+        </button>
+      </div>
+      <div id="sort-result" class="result hidden"></div>
+    </section>
+
+    <!-- Tab 2: 发现未收藏 -->
+    <section id="tab-discover" class="tab-panel">
+      <div class="card">
+        <p class="card-desc">找出你经常访问但还没收藏的网站，提醒你添加到收藏夹。</p>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="discoverPeriod" value="7" checked>
+            <span>最近 7 天</span>
+          </label>
+          <label class="option">
+            <input type="radio" name="discoverPeriod" value="30">
+            <span>最近 30 天</span>
+          </label>
+          <label class="option">
+            <input type="radio" name="discoverPeriod" value="90">
+            <span>最近 90 天</span>
+          </label>
+        </div>
+        <button id="btn-discover" class="btn btn-primary">
+          <span class="btn-text">发现未收藏的网站</span>
+          <span class="btn-loader hidden"></span>
+        </button>
+      </div>
+      <div id="discover-result" class="result hidden"></div>
+    </section>
+
+    <!-- Tab 3: 清理无用书签 -->
+    <section id="tab-cleanup" class="tab-panel">
+      <div class="card">
+        <p class="card-desc">找出收藏夹中很少使用或从未访问的书签，帮你清理无效收藏。</p>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="cleanupPeriod" value="0" checked>
+            <span>从未访问过</span>
+          </label>
+          <label class="option">
+            <input type="radio" name="cleanupPeriod" value="30">
+            <span>30 天内未访问</span>
+          </label>
+          <label class="option">
+            <input type="radio" name="cleanupPeriod" value="90">
+            <span>90 天内未访问</span>
+          </label>
+        </div>
+        <button id="btn-cleanup" class="btn btn-primary">
+          <span class="btn-text">查找无用书签</span>
+          <span class="btn-loader hidden"></span>
+        </button>
+      </div>
+      <div id="cleanup-result" class="result hidden"></div>
+    </section>
+
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

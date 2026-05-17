@@ -1,5 +1,6 @@
 const HISTORY_MAX = 100000;
 const SUGGEST_TOP_N = 30;
+const BACKUP_KEY = 'sortBackup';
 
 // ── Ignore list helpers ───────────────────────────────────
 
@@ -147,6 +148,10 @@ async function onSort() {
   resultEl.classList.add('hidden');
 
   try {
+    // 1. 备份当前书签位置
+    await saveBackup();
+
+    // 2. 执行排序
     const tree = await chrome.bookmarks.getTree();
     const historyMap = await buildHistoryMap(0);
     let totalSorted = 0;
@@ -158,12 +163,31 @@ async function onSort() {
       totalFolders += r.folders;
     }
 
+    // 3. 显示结果 + 撤销按钮
     resultEl.classList.remove('hidden');
     resultEl.innerHTML = `
       <div class="result-summary">
         <div class="big-number">${totalSorted}</div>
         <div class="summary-text">个书签已在 ${totalFolders} 个文件夹中完成排序</div>
+        <div class="undo-bar">
+          <button id="btn-undo-sort" class="btn btn-secondary">↩ 撤销排序</button>
+        </div>
       </div>`;
+
+    document.getElementById('btn-undo-sort').addEventListener('click', async () => {
+      const undoBtn = document.getElementById('btn-undo-sort');
+      undoBtn.disabled = true;
+      undoBtn.textContent = '正在撤销…';
+      try {
+        await restoreFromBackup();
+        undoBtn.textContent = '✅ 已撤销';
+        // 刷新结果区显示恢复完成
+        document.querySelector('.result-summary .summary-text').textContent =
+          '个书签已恢复到排序前的位置';
+      } catch (err) {
+        undoBtn.textContent = `撤销失败：${err.message}`;
+      }
+    });
   } catch (err) {
     showError(tab, `排序失败：${err.message}`);
   } finally {
@@ -202,6 +226,50 @@ async function sortTree(node, historyMap) {
 
   folders += 1;
   return { bookmarks, folders };
+}
+
+// ── Backup / Undo ─────────────────────────────────────────
+
+async function saveBackup() {
+  const tree = await chrome.bookmarks.getTree();
+  const snapshot = [];
+  (function walk(nodes) {
+    for (const n of nodes) {
+      if (n.url) {
+        snapshot.push({ id: n.id, parentId: n.parentId, index: n.index });
+      }
+      if (n.children) walk(n.children);
+    }
+  })(tree);
+  await chrome.storage.local.set({
+    [BACKUP_KEY]: { timestamp: Date.now(), snapshot }
+  });
+}
+
+async function loadBackup() {
+  const data = await chrome.storage.local.get(BACKUP_KEY);
+  return data[BACKUP_KEY] || null;
+}
+
+async function restoreFromBackup() {
+  const backup = await loadBackup();
+  if (!backup || !backup.snapshot.length) {
+    throw new Error('没有找到备份数据');
+  }
+
+  // 按 (parentId, index) 升序恢复，保证索引正确
+  const sorted = [...backup.snapshot].sort((a, b) => {
+    if (a.parentId !== b.parentId) return a.parentId.localeCompare(b.parentId);
+    return a.index - b.index;
+  });
+
+  for (const item of sorted) {
+    try {
+      await chrome.bookmarks.move(item.id, { parentId: item.parentId, index: item.index });
+    } catch {
+      // 书签可能已被删除，跳过
+    }
+  }
 }
 
 // ── Tab 2: Discover ──────────────────────────────────────
